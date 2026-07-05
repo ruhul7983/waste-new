@@ -416,11 +416,7 @@ HTML = """
 
 </div>
 
-<footer>
-  Model: EfficientNetB0 &nbsp;·&nbsp;
-  Explainability: <strong style="color:#4f46e5">Grad-CAM++</strong> &nbsp;·&nbsp;
-  Framework: TensorFlow / FastAPI
-</footer>
+
 
 <script>
   let selectedFile = null;
