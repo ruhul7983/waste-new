@@ -416,7 +416,11 @@ HTML = """
 
 </div>
 
-
+<footer>
+  Model: EfficientNetB0 &nbsp;·&nbsp;
+  Explainability: <strong style="color:#4f46e5">Grad-CAM++</strong> &nbsp;·&nbsp;
+  Framework: TensorFlow / FastAPI
+</footer>
 
 <script>
   let selectedFile = null;
@@ -533,7 +537,6 @@ HTML = """
       document.getElementById('infoPills').innerHTML = `
         <div class="pill">🕒 <span>${now.toLocaleTimeString()}</span></div>
         <div class="pill">📐 <span>224 × 224 px</span></div>
-        <div class="pill">🧠 <span>EfficientNetB0</span></div>
         <div class="pill">🔬 <span>Grad-CAM++</span></div>
         <div class="pill">🗂️ <span>${selectedFile.name.slice(0,24)}${selectedFile.name.length>24?'…':''}</span></div>
       `;
