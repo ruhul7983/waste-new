@@ -5,12 +5,24 @@ import base64
 from io import BytesIO
 from PIL import Image
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 
-# ── Load model ────────────────────────────────────────────────
-model = tf.keras.models.load_model("best_MobileNetV2_ft.keras")
+# ── Model registry ────────────────────────────────────────────
+# Add/remove/rename entries here to change what shows up in the dropdown.
+MODEL_REGISTRY = {
+    "mobilenetv2": {
+        "label": "MobileNetV2",
+        "path": "best_MobileNetV2_ft.keras",
+    },
+    "proposed_cnn": {
+        "label": "Proposed CNN",
+        "path": "best_Proposed_CNN.keras",
+    },
+}
+DEFAULT_MODEL_ID = "mobilenetv2"
+
 CLASS_NAMES = ["Digestive", "Indigestive"]
 
 CONV_LIKE_LAYERS = (
@@ -43,10 +55,28 @@ def find_last_conv_layer(keras_model):
     return None, None
 
 
-LAST_CONV_NAME, CONV_OWNER = find_last_conv_layer(model)
-if LAST_CONV_NAME is None:
-    raise RuntimeError("Could not find any convolutional layer in the loaded model.")
-print(f"[OK] Grad-CAM++ layer: '{LAST_CONV_NAME}' in '{CONV_OWNER.name}'")
+# ── Load all models up front ──────────────────────────────────
+# Each entry in MODEL_REGISTRY gets populated with:
+#   "model": the loaded tf.keras.Model
+#   "conv_name": last conv layer name (for Grad-CAM++)
+#   "conv_owner": the (sub)model that owns that conv layer
+for model_id, info in MODEL_REGISTRY.items():
+    print(f"[LOADING] '{model_id}' from '{info['path']}' ...")
+    # compile=False: we only need the model for inference + Grad-CAM++,
+    # so we skip reconstructing the optimizer/loss. This also avoids
+    # deserialization errors for models saved with custom loss functions
+    # (e.g. the Proposed CNN's focal_loss, which isn't registered here).
+    loaded_model = tf.keras.models.load_model(info["path"], compile=False)
+    conv_name, conv_owner = find_last_conv_layer(loaded_model)
+    if conv_name is None:
+        raise RuntimeError(
+            f"Could not find any convolutional layer in model '{model_id}' "
+            f"({info['path']})."
+        )
+    info["model"] = loaded_model
+    info["conv_name"] = conv_name
+    info["conv_owner"] = conv_owner
+    print(f"[OK] '{model_id}' Grad-CAM++ layer: '{conv_name}' in '{conv_owner.name}'")
 
 app = FastAPI()
 
@@ -113,6 +143,45 @@ HTML = """
       padding: clamp(20px, 5vw, 32px);
       width: 100%;
       max-width: 720px;
+    }
+
+    /* ── Model selector ─────────────────────────────────────── */
+    .model-select-wrap {
+      margin-bottom: 16px;
+    }
+    .model-select-label {
+      font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .6px;
+      color: var(--muted);
+      margin-bottom: 8px;
+      display: block;
+    }
+    .model-select-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+    @media (max-width: 560px) {
+      .model-select-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    .model-chip {
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      border-radius: 10px;
+      padding: 10px 8px;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+      cursor: pointer;
+      transition: border-color .15s, background .15s, color .15s;
+      user-select: none;
+    }
+    .model-chip:hover { border-color: var(--green); }
+    .model-chip.active {
+      border-color: var(--green);
+      background: rgba(34,197,94,.12);
+      color: var(--green-dark);
     }
 
     .upload-zone {
@@ -341,6 +410,13 @@ HTML = """
 
 <div class="card">
 
+  <div class="model-select-wrap">
+    <span class="model-select-label">Choose model</span>
+    <div class="model-select-grid" id="modelSelectGrid">
+      <!-- chips injected by JS from /models -->
+    </div>
+  </div>
+
   <div class="upload-zone" id="uploadZone"
        onclick="document.getElementById('fileInput').click()"
        ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
@@ -417,13 +493,46 @@ HTML = """
 </div>
 
 <footer>
-  Model: EfficientNetB0 &nbsp;·&nbsp;
+  Model: <strong id="footerModelName" style="color:#4f46e5">MobileNetV2</strong> &nbsp;·&nbsp;
   Explainability: <strong style="color:#4f46e5">Grad-CAM++</strong> &nbsp;·&nbsp;
   Framework: TensorFlow / FastAPI
 </footer>
 
 <script>
   let selectedFile = null;
+  let selectedModelId = null;
+
+  // ── Model selector ──────────────────────────────────────────
+  async function loadModelOptions() {
+    const res = await fetch('/models');
+    const data = await res.json();
+    selectedModelId = data.default;
+
+    const grid = document.getElementById('modelSelectGrid');
+    grid.innerHTML = data.models.map(m => `
+      <div class="model-chip ${m.id === selectedModelId ? 'active' : ''}"
+           data-id="${m.id}" onclick="selectModel('${m.id}')">
+        ${m.label}
+      </div>
+    `).join('');
+
+    updateFooterModelName();
+  }
+
+  function selectModel(modelId) {
+    selectedModelId = modelId;
+    document.querySelectorAll('.model-chip').forEach(chip => {
+      chip.classList.toggle('active', chip.dataset.id === modelId);
+    });
+    updateFooterModelName();
+  }
+
+  function updateFooterModelName() {
+    const chip = document.querySelector(`.model-chip[data-id="${selectedModelId}"]`);
+    document.getElementById('footerModelName').textContent = chip ? chip.textContent.trim() : selectedModelId;
+  }
+
+  loadModelOptions();
 
   function onDragOver(e)  { e.preventDefault(); document.getElementById('uploadZone').classList.add('drag'); }
   function onDragLeave(e) { document.getElementById('uploadZone').classList.remove('drag'); }
@@ -500,6 +609,7 @@ HTML = """
 
     const formData = new FormData();
     formData.append('file', selectedFile);
+    formData.append('model_id', selectedModelId);
 
     try {
       const res  = await fetch('/predict', { method: 'POST', body: formData });
@@ -537,6 +647,7 @@ HTML = """
       document.getElementById('infoPills').innerHTML = `
         <div class="pill">🕒 <span>${now.toLocaleTimeString()}</span></div>
         <div class="pill">📐 <span>224 × 224 px</span></div>
+        <div class="pill">🧠 <span>${data.model_label}</span></div>
         <div class="pill">🔬 <span>Grad-CAM++</span></div>
         <div class="pill">🗂️ <span>${selectedFile.name.slice(0,24)}${selectedFile.name.length>24?'…':''}</span></div>
       `;
@@ -609,19 +720,19 @@ def compute_gradcampp(
 
 
 # ── Grad-CAM++ driver ─────────────────────────────────────────
-def generate_gradcampp(img_array: np.ndarray) -> np.ndarray:
+def generate_gradcampp(img_array: np.ndarray, keras_model, conv_name: str, conv_owner) -> np.ndarray:
     """
-    Compute Grad-CAM++ heatmap.
+    Compute Grad-CAM++ heatmap for a given model.
     Fix: for transfer-learning models the gradient path must go
     through the FULL model output, not just the sub-model.
     """
     img_tensor = tf.constant(img_array, dtype=tf.float32)
 
-    if CONV_OWNER is model:
+    if conv_owner is keras_model:
         # Flat / custom CNN
         grad_model = tf.keras.models.Model(
-            inputs=model.inputs,
-            outputs=[model.get_layer(LAST_CONV_NAME).output, model.output],
+            inputs=keras_model.inputs,
+            outputs=[keras_model.get_layer(conv_name).output, keras_model.output],
         )
         with tf.GradientTape() as tape:
             conv_outputs, predictions = grad_model(img_tensor, training=False)
@@ -639,11 +750,11 @@ def generate_gradcampp(img_array: np.ndarray) -> np.ndarray:
         # FIX 3: build a single end-to-end gradient model so
         # gradients flow from the full model output back to the
         # conv layer — avoids the "None gradient" problem.
-        sub_conv_output = CONV_OWNER.get_layer(LAST_CONV_NAME).output
+        sub_conv_output = conv_owner.get_layer(conv_name).output
 
         # Intermediate model: input → last conv layer output
         conv_model = tf.keras.models.Model(
-            inputs=CONV_OWNER.inputs,
+            inputs=conv_owner.inputs,
             outputs=sub_conv_output,
         )
 
@@ -653,7 +764,7 @@ def generate_gradcampp(img_array: np.ndarray) -> np.ndarray:
 
             # Reconstruct path from conv_outputs through the rest of the model
             # by running the full model AND watching the intermediate tensor
-            predictions = model(img_tensor, training=False)
+            predictions = keras_model(img_tensor, training=False)
             if isinstance(predictions, (list, tuple)):
                 predictions = tf.concat(
                     [tf.reshape(p, (tf.shape(p)[0], -1)) for p in predictions],
@@ -721,8 +832,31 @@ def home():
     return HTML
 
 
+@app.get("/models")
+def get_models():
+    """Return the list of available models for the dropdown/chips."""
+    return {
+        "models": [
+            {"id": model_id, "label": info["label"]}
+            for model_id, info in MODEL_REGISTRY.items()
+        ],
+        "default": DEFAULT_MODEL_ID,
+    }
+
+
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)):
+async def predict(file: UploadFile = File(...), model_id: str = Form(DEFAULT_MODEL_ID)):
+    if model_id not in MODEL_REGISTRY:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Unknown model_id '{model_id}'."},
+        )
+
+    model_info = MODEL_REGISTRY[model_id]
+    keras_model = model_info["model"]
+    conv_name   = model_info["conv_name"]
+    conv_owner  = model_info["conv_owner"]
+
     contents = await file.read()
     npimg = np.frombuffer(contents, np.uint8)
 
@@ -745,7 +879,7 @@ async def predict(file: UploadFile = File(...)):
     processed = preprocess(img_rgb)
 
     # ── Prediction ────────────────────────────────────────────
-    raw_pred = model.predict(processed, verbose=0)
+    raw_pred = keras_model.predict(processed, verbose=0)
     if isinstance(raw_pred, (list, tuple)):
         raw_pred = np.concatenate(
             [np.reshape(p, (p.shape[0], -1)) for p in raw_pred], axis=1
@@ -763,7 +897,7 @@ async def predict(file: UploadFile = File(...)):
         confidence      = p_digestive
 
     # ── Grad-CAM++ heatmap ────────────────────────────────────
-    heatmap     = generate_gradcampp(processed)
+    heatmap     = generate_gradcampp(processed, keras_model, conv_name, conv_owner)
     display_img = cv2.resize(img_rgb, (224, 224))
     overlay     = overlay_heatmap(display_img, heatmap)
     heatmap_b64 = to_base64_png(overlay)
@@ -778,6 +912,8 @@ async def predict(file: UploadFile = File(...)):
         "confidence":      round(confidence * 100, 2),
         "all_confidences": all_confidences,
         "heatmap":         heatmap_b64,
+        "model_id":        model_id,
+        "model_label":     model_info["label"],
     }
 
 
